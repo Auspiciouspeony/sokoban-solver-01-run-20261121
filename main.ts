@@ -1,137 +1,20 @@
-// Push-optimal Sokoban solver, room by room. Generated levels are a hallway
-// with independent rooms off it (a box pushed out of a door never returns),
-// so each room is solved push-optimally alone and the optima add up to the
-// level's optimum: full points. BFS over pushes; a state is the boxes plus
-// the player's reachable region (named by its lowest square). Prunes: dead
-// squares (no pull path to any goal) and frozen 2x2 blocks. Pure work caps,
-// never the clock, so two runs write identical bytes.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-const I = process.env.MAKEFUN_INPUT_DIR ?? '/input', O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-const M = 250_000;
-const D = [[0, -1, 'u', 'U'], [0, 1, 'd', 'D'], [-1, 0, 'l', 'L'], [1, 0, 'r', 'R']];
-type L = [number, Uint8Array, number[], number[], number];
-function parse(t: string): L {
-  const r = t.split('\n').filter((x) => x.length > 0), h = r.length, w = Math.max(...r.map((x) => x.length));
-  const a = new Uint8Array(w * h).fill(1), g: number[] = [], b: number[] = [];
-  let p = -1;
-  r.forEach((row, y) => { for (let x = 0; x < row.length; x++) { const c = row[x]!, i = y * w + x; if (c === '#') continue; a[i] = 0; if ('.*+'.includes(c)) g.push(i); if ('$*'.includes(c)) b.push(i); if ('@+'.includes(c)) p = i; } });
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x === 0 || y === 0 || x === w - 1 || y === h - 1) a[y * w + x] = 1;
-  return [w, a, g, b.sort((x, y) => x - y), p];
-}
-function live(w: number, a: Uint8Array, g: number[]): Uint8Array {
-  const l = new Uint8Array(a.length), q = [...g];
-  for (const x of g) l[x] = 1;
-  for (let i = 0; i < q.length; i++) { const x = q[i]!; for (const [dx, dy] of D) { const d = dy * w + dx, y = x - d; if (!a[y] && !a[y - d] && !l[y]) { l[y] = 1; q.push(y); } } }
-  return l;
-}
-function reach(w: number, a: Uint8Array, o: Uint8Array, f: number, s: Int32Array, t: number, k: Int32Array): number {
-  let lo = f, n = 0;
-  k[n++] = f; s[f] = t;
-  while (n > 0) { const p = k[--n]!; if (p < lo) lo = p; for (const q of [p - w, p + w, p - 1, p + 1]) if (!a[q] && !o[q] && s[q] !== t) { s[q] = t; k[n++] = q; } }
-  return lo;
-}
-function frozen(w: number, a: Uint8Array, o: Uint8Array, g: Uint8Array, t: number): boolean {
-  for (const x of [t, t - 1, t - w, t - w - 1]) { const b = x + 1, c = x + w, d = c + 1; if (!(a[x] || o[x]) || !(a[b] || o[b]) || !(a[c] || o[c]) || !(a[d] || o[d])) continue; if ((o[x] && !g[x]) || (o[b] && !g[b]) || (o[c] && !g[c]) || (o[d] && !g[d])) return true; }
-  return false;
-}
-function walk(w: number, a: Uint8Array, o: Uint8Array, f: number, t: number): string {
-  if (f === t) return '';
-  const p = new Int32Array(a.length).fill(-1), h = new Array<string>(a.length), q = [f];
-  p[f] = f;
-  for (let i = 0; i < q.length; i++) { const x = q[i]!; if (x === t) break; for (const [dx, dy, l] of D) { const n = x + dy * w + dx; if (a[n] || o[n] || p[n] !== -1) continue; p[n] = x; h[n] = l; q.push(n); } }
-  if (p[t] === -1) throw new Error('unreachable');
-  let s = '';
-  for (let x = t; x !== f; x = p[x]!) s = h[x]! + s;
-  return s;
-}
-function opt(v: L, max = M): { n: number; m: string } | null {
-  const [w, a, G, B, P] = v, S = a.length, g = new Uint8Array(S);
-  for (const x of G) g[x] = 1;
-  const li = live(w, a, G);
-  if (B.some((b) => !li[b])) return null;
-  const o = new Uint8Array(S), s1 = new Int32Array(S), s2 = new Int32Array(S), st = new Int32Array(S);
-  let tm = 0;
-  const ok = (b: number[]): boolean => b.every((x) => g[x]);
-  const key = (b: number[], l: number): number => { let k = l; for (const x of b) k = k * S + x; return k; };
-  const SB: number[][] = [B], SP: number[] = [P], pa: number[] = [-1], ix = new Map<number, number>();
-  for (const b of B) o[b] = 1;
-  ix.set(key(B, reach(w, a, o, P, s1, ++tm, st)), 0);
-  for (const b of B) o[b] = 0;
-  let fd = ok(B) ? 0 : -1;
-  for (let hd = 0; fd < 0 && hd < SB.length; hd++) {
-    const b = SB[hd]!;
-    for (const x of b) o[x] = 1;
-    reach(w, a, o, SP[hd]!, s1, ++tm, st);
-    const he = tm;
-    for (let bi = 0; bi < b.length && fd < 0; bi++) {
-      const x = b[bi]!;
-      for (const [dx, dy] of D) {
-        const d = dy * w + dx, t = x + d;
-        if (s1[x - d] !== he || a[t] || o[t] || !li[t]) continue;
-        o[x] = 0; o[t] = 1;
-        const fr = frozen(w, a, o, g, t);
-        let k = -1, nx: number[] | null = null;
-        if (!fr) { nx = b.slice(); nx[bi] = t; nx.sort((p, q) => p - q); k = key(nx, reach(w, a, o, x, s2, ++tm, st)); }
-        o[t] = 0; o[x] = 1;
-        if (fr || ix.has(k)) continue;
-        if (SB.length >= max) { for (const y of b) o[y] = 0; return null; }
-        ix.set(k, SB.length); SB.push(nx!); SP.push(x); pa.push(hd);
-        if (ok(nx!)) { fd = SB.length - 1; break; }
-      }
-    }
-    for (const x of b) o[x] = 0;
-  }
-  if (fd < 0) return null;
-  const ph: number[] = [];
-  for (let s = fd; s > 0; s = pa[s]!) ph.push(s);
-  ph.reverse();
-  let m = '', pl = P, b = B;
-  for (const s of ph) {
-    const nb = SB[s]!, f = b.find((x) => !nb.includes(x))!, t = nb.find((x) => !b.includes(x))!, d = t - f;
-    const dr = D.find(([dx, dy]) => dy * w + dx === d)!;
-    for (const x of b) o[x] = 1;
-    m += walk(w, a, o, pl, f - d);
-    for (const x of b) o[x] = 0;
-    m += dr[3]; pl = f; b = nb;
-  }
-  return { n: ph.length, m };
-}
-function rooms(v: L): { b: number[]; g: number[]; d?: boolean }[] | null {
-  const [w, a, G, B, P] = v, li = live(w, a, G), r = Math.floor(P / w), c = new Uint8Array(a.length);
-  for (let i = r * w; i < (r + 1) * w; i++) if (!a[i] && !li[i]) c[i] = 1;
-  if (B.some((b) => c[b])) return null;
-  const pt = new Int32Array(a.length).fill(-1), rs: { b: number[]; g: number[]; d?: boolean }[] = [];
-  for (let s = 0; s < a.length; s++) {
-    if (a[s] || c[s] || pt[s] >= 0) continue;
-    const q = [s];
-    pt[s] = rs.length;
-    for (let i = 0; i < q.length; i++) for (const [dx, dy] of D) { const n = q[i]! + dy * w + dx; if (!a[n] && !c[n] && pt[n] < 0) { pt[n] = rs.length; q.push(n); } }
-    rs.push({ b: [], g: [] });
-  }
-  for (const b of B) rs[pt[b]!]!.b.push(b);
-  for (const g of G) if (pt[g]! >= 0) rs[pt[g]!]!.g.push(g);
-  if (G.some((g) => pt[g]! < 0) || rs.some((x) => x.b.length !== x.g.length)) return null;
-  return rs.filter((x) => x.b.length > 0);
-}
-function solve(t: string): string {
-  try {
-    const v = parse(t), rs = rooms(v);
-    if (rs === null) return opt(v)?.m ?? '';
-    let pl = v[4], m = '';
-    for (const r of rs) {
-      const a = v[1].slice();
-      for (const o of rs) if (o !== r) for (const b of o.d ? o.g : o.b) a[b] = 1;
-      const s = opt([v[0], a, r.g.slice().sort((x, y) => x - y), r.b.slice().sort((x, y) => x - y), pl]);
-      if (s === null) return '';
-      m += s.m;
-      for (const ch of s.m.toLowerCase()) pl += ch === 'u' ? -v[0] : ch === 'd' ? v[0] : ch === 'l' ? -1 : 1;
-      r.d = true;
-    }
-    return m;
-  } catch { return ''; }
-}
-for (const id of readdirSync(I).sort()) {
-  mkdirSync(join(O, id), { recursive: true });
-  writeFileSync(join(O, id, 'solution.txt'), `${solve(readFileSync(join(I, id, 'level.txt'), 'utf8'))}\n`);
-}
+// Push-optimal Sokoban solver, room by room: generated levels are a hallway
+// with independent rooms off it, so each room is solved push-optimally alone
+// and the optima add up to the level's optimum. BFS over pushes; a state is
+// the boxes plus the player's reachable region (lowest square). Prunes: dead
+// squares and frozen 2x2 blocks. Pure work caps, never the clock.
+import{mkdirSync,readdirSync,readFileSync,writeFileSync}from'node:fs';
+import{join}from'node:path';
+const I=process.env.MAKEFUN_INPUT_DIR??'/input',O=process.env.MAKEFUN_OUTPUT_DIR??'/output',M=25e4,U='udlr',Y='UDLR';
+function P(t){const r=t.split('\n').filter(x=>x),h=r.length,w=Math.max(...r.map(x=>x.length)),a=new Uint8Array(w*h).fill(1),g=[],b=[];let p=-1;
+r.forEach((s,y)=>{for(let x=0;x<s.length;x++){const c=s[x],i=y*w+x;if(c=='#')continue;a[i]=0;if('.*+'.includes(c))g.push(i);if('$*'.includes(c))b.push(i);if('@+'.includes(c))p=i}});
+for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(!x||!y||x==w-1||y==h-1)a[y*w+x]=1;
+return[w,a,g,b.sort((x,y)=>x-y),p]}
+function L(w,a,g){const l=new Uint8Array(a.length),q=[...g];for(const x of g)l[x]=1;for(let i=0;i<q.length;i++){const x=q[i];for(let k=0;k<4;k++){const d=[-w,w,-1,1][k],y=x-d;if(!a[y]&&!a[y-d]&&!l[y]){l[y]=1;q.push(y)}}}return l}
+function R(w,a,o,f,s,t,k){let l=f,n=0;k[n++]=f;s[f]=t;while(n>0){const p=k[--n];if(p<l)l=p;for(const q of[p-w,p+w,p-1,p+1])if(!a[q]&&!o[q]&&s[q]!=t){s[q]=t;k[n++]=q}}return l}
+function F(w,a,o,g,t){for(const x of[t,t-1,t-w,t-w-1]){const b=x+1,c=x+w,d=c+1;if(!(a[x]||o[x])||!(a[b]||o[b])||!(a[c]||o[c])||!(a[d]||o[d]))continue;if(o[x]&&!g[x]||o[b]&&!g[b]||o[c]&&!g[c]||o[d]&&!g[d])return 1}return 0}
+function W(w,a,o,f,t){if(f==t)return'';const p=new Int32Array(a.length).fill(-1),h=[],q=[f];p[f]=f;for(let i=0;i<q.length;i++){const x=q[i];if(x==t)break;for(let k=0;k<4;k++){const n=x+[-w,w,-1,1][k];if(a[n]||o[n]||p[n]!=-1)continue;p[n]=x;h[n]=U[k];q.push(n)}}if(p[t]==-1)throw new Error('push square out of reach');let s='';for(let x=t;x!=f;x=p[x])s=h[x]+s;return s}
+function S(v,m=M){const[w,a,G,B,P]=v,N=a.length,g=new Uint8Array(N);for(const x of G)g[x]=1;const l=L(w,a,G);if(B.some(b=>!l[b]))return null;const o=new Uint8Array(N),e=new Int32Array(N),e2=new Int32Array(N),k=new Int32Array(N);let t=0;const K=(b,x)=>{let r=x;for(const y of b)r=r*N+y;return r},Q=b=>b.every(x=>g[x]),A=[B],C=[P],p=[-1],ix=new Map;for(const b of B)o[b]=1;ix.set(K(B,R(w,a,o,P,e,++t,k)),0);for(const b of B)o[b]=0;let f=Q(B)?0:-1;for(let h=0;f<0&&h<A.length;h++){const b=A[h];for(const x of b)o[x]=1;R(w,a,o,C[h],e,++t,k);const E=t;for(let j=0;j<b.length&&f<0;j++){const x=b[j];for(let q=0;q<4;q++){const d=[-w,w,-1,1][q],y=x+d;if(e[x-d]!=E||a[y]||o[y]||!l[y])continue;o[x]=0;o[y]=1;const z=F(w,a,o,g,y);let n=-1,X=null;if(!z){X=b.slice();X[j]=y;X.sort((u,v)=>u-v);n=K(X,R(w,a,o,x,e2,++t,k))}o[y]=0;o[x]=1;if(z||ix.has(n))continue;if(A.length>=m){for(const y of b)o[y]=0;return null}ix.set(n,A.length);A.push(X);C.push(x);p.push(h);if(Q(X)){f=A.length-1;break}}}for(const x of b)o[x]=0}if(f<0)return null;const H=[];for(let s=f;s>0;s=p[s])H.push(s);H.reverse();let r='',u=P,b=B;for(const s of H){const N=A[s],f=b.find(x=>!N.includes(x)),y=N.find(x=>!b.includes(x)),d=y-f;for(const x of b)o[x]=1;r+=W(w,a,o,u,f-d);for(const x of b)o[x]=0;r+=Y[[-w,w,-1,1].indexOf(d)];u=f;b=N}return r}
+function T(v){const[w,a,G,B,P]=v,l=L(w,a,G),r=P/w|0,c=new Uint8Array(a.length);for(let i=r*w;i<(r+1)*w;i++)if(!a[i]&&!l[i])c[i]=1;if(B.some(b=>c[b]))return null;const q=new Int32Array(a.length).fill(-1),Rs=[];for(let s=0;s<a.length;s++){if(a[s]||c[s]||q[s]>=0)continue;const e=[s];q[s]=Rs.length;for(let i=0;i<e.length;i++)for(let k=0;k<4;k++){const n=e[i]+[-w,w,-1,1][k];if(!a[n]&&!c[n]&&q[n]<0){q[n]=Rs.length;e.push(n)}}Rs.push([[],[]])}for(const b of B)Rs[q[b]][0].push(b);for(const g of G)if(q[g]>=0)Rs[q[g]][1].push(g);if(G.some(g=>q[g]<0)||Rs.some(x=>x[0].length!=x[1].length))return null;return Rs.filter(x=>x[0].length)}
+function solve(t){try{const v=P(t),r=T(v);if(!r)return S(v)??'';let u=v[4],m='';for(const x of r){const a=v[1].slice();for(const o of r)if(o!=x)for(const b of o[2]?o[1]:o[0])a[b]=1;const s=S([v[0],a,x[1].slice().sort((p,q)=>p-q),x[0].slice().sort((p,q)=>p-q),u]);if(s==null)return'';m+=s;for(const c of s.toLowerCase())u+=c=='u'?-v[0]:c=='d'?v[0]:c=='l'?-1:1;x[2]=1}return m}catch{return''}}
+for(const id of readdirSync(I).sort()){mkdirSync(join(O,id),{recursive:!0});writeFileSync(join(O,id,'solution.txt'),solve(readFileSync(join(I,id,'level.txt'),'utf8'))+'\n')}
